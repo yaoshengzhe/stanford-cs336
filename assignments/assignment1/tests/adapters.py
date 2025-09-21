@@ -59,12 +59,12 @@ def run_embedding(
     Returns:
         Float[Tensor, "... d_model"]: Batch of embeddings returned by your Embedding layer.
     """
-    
+
     layer = transformer.Embedding(vocab_size, d_model)
 
     layer.load_state_dict({'weights': weights})
-    
-    return layer(token_ids) 
+
+    return layer(token_ids)
 
 
 def run_swiglu(
@@ -391,7 +391,12 @@ def run_rmsnorm(
         Float[Tensor,"... d_model"]: Tensor of with the same shape as `in_features` with the output of running
         RMSNorm of the `in_features`.
     """
-    raise NotImplementedError
+
+    layer = transformer.RMSNorm(d_model, eps)
+
+    layer.load_state_dict({'weights': weights})
+
+    return layer(in_features)
 
 
 def run_silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
