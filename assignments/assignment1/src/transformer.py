@@ -21,3 +21,18 @@ class Linear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.einsum('... i, ji -> ... j', x, self.weights)
 
+class Embedding(nn.Module):
+    def __init__(self,
+                 vocab: int,
+                 d_model: int,
+                 device: torch.device=None,
+                 dtype: torch.dtype=None):
+        super().__init__()
+
+        # vocab, d_model
+        self.weights = nn.Parameter(torch.empty(vocab, d_model))
+
+        nn.init.trunc_normal_(self.weights, std=1, a=-3, b=3)
+
+    def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
+        return self.weights[token_ids]
