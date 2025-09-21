@@ -11,7 +11,10 @@ from torch import Tensor
 
 import sys
 sys.path.append('..')
+
 from src import bpe
+from src import transformer
+
 
 def run_linear(
     d_in: int,
@@ -32,7 +35,10 @@ def run_linear(
         Float[Tensor, "... d_out"]: The transformed output of your linear module.
     """
 
-    raise NotImplementedError
+    layer = transformer.Linear(d_in, d_out)
+    layer.load_state_dict({'weights': weights})
+
+    return layer(in_features)
 
 
 def run_embedding(
@@ -303,7 +309,7 @@ def run_transformer_lm(
         num_heads (int): Number of heads to use in multi-headed attention. `d_model` must be
             evenly divisible by `num_heads`.
         d_ff (int): Dimensionality of the feed-forward inner layer (section 3.3).
-        rope_theta (float): The RoPE $\Theta$ parameter.
+        rope_theta (float): The RoPE $\\Theta$ parameter.
         weights (dict[str, Tensor]):
             State dict of our reference implementation. {num_layers} refers to an
             integer between `0` and `num_layers - 1` (the layer index).
