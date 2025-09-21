@@ -50,7 +50,7 @@ class ChunkedTokenReader:
             escaped.sort(key=lambda x: -len(x))
             split_pattern = f"({'|'.join(escaped)})"
 
-        with open(filepath, 'r', encoding='utf-8') as f:
+        with open(filepath, 'r', encoding='utf-8', errors='ignore') as f:
             boundaries = self._find_chunk_boundaries(f, self.num_threads, first_special_token)
 
             # Create tasks for parallel processing with chunk IDs
@@ -124,7 +124,7 @@ class ChunkedTokenReader:
                     break
 
                 # Find the special token in the mini chunk
-                found_at = mini_chunk.find(split_special_token.decode('utf-8'))
+                found_at = mini_chunk.find(split_special_token.decode('utf-8', errors='replace'))
                 if found_at != -1:
                     chunk_boundaries[bi] = initial_position + found_at
                     break
