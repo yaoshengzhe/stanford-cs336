@@ -4,6 +4,10 @@ import math
 import torch
 import torch.nn as nn
 
+def softmax(x: torch.Tensor) -> torch.Tensor:
+    e = torch.exp(x - torch.max(x))
+    return e / e.sum(dim=1, keepdim=True)
+
 class Linear(nn.Module):
     def __init__(self,
                  in_features: int,
