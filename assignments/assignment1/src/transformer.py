@@ -28,7 +28,6 @@ def dot_product_attention(
     """
     # query, key
     QK = torch.einsum('... qd, ... kd -> ... qk', Q, K)
-    # query, key
     masked = QK.masked_fill(~mask, float('-inf'))
 
     # query, key
@@ -191,3 +190,77 @@ class RotaryPositionalEmbedding(nn.Module):
 
         # flatten last two dims back
         return transformed.view(*x.shape)
+
+
+class MultiHeadAttention(nn.Module):
+    def __init__(self, d_model: int,
+                 num_heads: int,
+                 max_seq_len: int = 0,
+                 theta: float = -1.0):
+
+        super().__init__()
+
+        self.d_model = d_model
+        self.num_heads = num_heads
+
+        # d_k, d_model
+        self.wq = nn.Parameter(torch.empty(d_model, d_model))
+        nn.init.trunc_normal_(self.wq)
+
+        # d_k, d_in
+        self.wk = nn.Parameter(torch.empty(d_model, d_model))
+        nn.init.trunc_normal_(self.wk)
+
+        # d_k, d_in
+        self.wv = nn.Parameter(torch.empty(d_model, d_model))
+        nn.init.trunc_normal_(self.wv)
+
+        # d_model d_k
+        self.wo = nn.Parameter(torch.empty(d_model, d_model))
+        nn.init.trunc_normal_(self.wo)
+
+        if theta > 0:
+            self.rope = RotaryPositionalEmbedding(theta=theta,
+                                                  d_k=d_model // num_heads,
+                                                  max_seq_len=max_seq_len)
+
+
+    def _split_heads(self, qkv: torch.Tensor):
+        d_head = self.d_model // self.num_heads
+
+        *leading, seq_len, d_model = qkv.shape
+
+        x = qkv.reshape(*leading, seq_len, self.num_heads, d_head)
+        x = x.transpose(-3, -2)
+        # now x: ..., num_heads, seq_len, d_head
+        return x
+
+    def _merge_heads(self, attention: torch.Tensor):
+        *leading, num_heads, seq_len, d_head = attention.shape
+
+        out = attention.transpose(-3, -2)
+        return out.reshape(*leading, seq_len, num_heads * d_head)
+
+
+    def forward(self, x: torch.Tensor, token_positions: torch.Tensor | None = None) -> torch.Tensor:
+        # x: Float[Tensor, " ... sequence_length d_model"],
+
+        Q = self._split_heads(x @ self.wq.T)
+        K = self._split_heads(x @ self.wk.T)
+        V = self._split_heads(x @ self.wv.T)
+
+        if token_positions is not None:
+            # apply RoPE
+            Q = self.rope(Q, token_positions)
+            K = self.rope(K, token_positions)
+
+        seq_len = x.shape[-2]
+        mask = torch.tril(torch.ones(seq_len, seq_len, dtype=torch.bool, device=x.device))
+
+        # wo: d_model, d_model
+        # dot product attention: d_k, d_k
+        attention = dot_product_attention(Q, K, V, mask)
+        # ..., seq_len, d_model
+        out = self._merge_heads(attention)
+
+        return out @ self.wo.T
