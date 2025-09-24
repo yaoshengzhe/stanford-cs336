@@ -6,7 +6,35 @@ import torch.nn as nn
 
 def softmax(x: torch.Tensor) -> torch.Tensor:
     e = torch.exp(x - torch.max(x))
-    return e / e.sum(dim=1, keepdim=True)
+    return e / e.sum(dim=-1, keepdim=True)
+
+def dot_product_attention(
+    Q: Float[Tensor, " ... queries d_k"],
+    K: Float[Tensor, " ... keys d_k"],
+    V: Float[Tensor, " ... values d_v"],
+    mask: Float[Tensor, " ... queries keys"] | None = None,
+) -> Float[Tensor, " ... queries d_v"]:
+    """
+    Given key (K), query (Q), and value (V) tensors, return
+    the output of your scaled dot product attention implementation.
+
+    Args:
+        Q (Float[Tensor, " ... queries d_k"]): Query tensor
+        K (Float[Tensor, " ... keys d_k"]): Key tensor
+        V (Float[Tensor, " ... values d_v"]): Values tensor
+        mask (Float[Tensor, " ... queries keys"] | None): Mask tensor
+    Returns:
+        Float[Tensor, " ... queries d_v"]: Output of SDPA
+    """
+    # query, key
+    QK = torch.einsum('... qd, ... kd -> ... qk', Q, K)
+    # query, key
+    masked = QK.masked_fill(~mask, float('-inf'))
+
+    # query, key
+    sm = softmax(masked / math.sqrt(Q.shape[-1]))
+
+    return torch.einsum('... qk, ... kv -> ... qv', sm, V)
 
 class Linear(nn.Module):
     def __init__(self,
