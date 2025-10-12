@@ -264,3 +264,92 @@ class MultiHeadAttention(nn.Module):
         out = self._merge_heads(attention)
 
         return out @ self.wo.T
+
+
+class TransformerBlock(nn.Module):
+    def __init__(self,
+                 d_model: int,
+                 num_heads: int,
+                 max_seq_len: int,
+                 theta: int,
+                 d_ff: int):
+        super().__init__()
+
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.max_seq_len = max_seq_len
+        self.theta = theta
+        self.d_ff = d_ff
+
+        self.attn_rms = RMSNorm(self.d_model)
+        self.attn = MultiHeadAttention(self.d_model,
+                                       self.num_heads,
+                                       self.max_seq_len,
+                                       self.theta)
+
+        self.ff_rms = RMSNorm(self.d_model)
+        self.ff = SwiGLU(self.d_model, self.d_ff)
+
+    def forward(self, x: torch.Tensor):
+        # x: batch, sequence_length, d_model
+        seq_len = x.shape[1]
+
+        x = x + self.attn(self.attn_rms(x), torch.arange(seq_len))
+
+        x = x + self.ff(self.ff_rms(x))
+
+        return x
+
+    def load_weights(self, weights: dict[str, Tensor]):
+        '''
+            weights (dict[str, Tensor]):
+            State dict of our reference implementation.
+            The keys of this dictionary are:
+            - `attn.q_proj.weight`
+                The query projections for all `num_heads` attention heads.
+                Shape is (d_model, d_model).
+                The rows are ordered by matrices of shape (num_heads, d_k),
+                so `attn.q_proj.weight == torch.cat([q_heads.0.weight, ..., q_heads.N.weight], dim=0)`.
+            - `attn.k_proj.weight`
+                The key projections for all `num_heads` attention heads.
+                Shape is (d_model, d_model).
+                The rows are ordered by matrices of shape (num_heads, d_k),
+                so `attn.k_proj.weight == torch.cat([k_heads.0.weight, ..., k_heads.N.weight], dim=0)`.
+            - `attn.v_proj.weight`
+                The value projections for all `num_heads` attention heads.
+                Shape is (d_model, d_model).
+                The rows are ordered by matrices of shape (num_heads, d_v),
+                so `attn.v_proj.weight == torch.cat([v_heads.0.weight, ..., v_heads.N.weight], dim=0)`.
+            - `attn.output_proj.weight`
+                Weight of the multi-head self-attention output projection
+                Shape is (d_model, d_model).
+            - `ln1.weight`
+                Weights of affine transform for the first RMSNorm
+                applied in the transformer block.
+                Shape is (d_model,).
+            - `ffn.w1.weight`
+                Weight of the first linear transformation in the FFN.
+                Shape is (d_model, d_ff).
+            - `ffn.w2.weight`
+                Weight of the second linear transformation in the FFN.
+                Shape is (d_ff, d_model).
+            - `ffn.w3.weight`
+                Weight of the third linear transformation in the FFN.
+                Shape is (d_model, d_ff).
+            - `ln2.weight`
+                Weights of affine transform for the second RMSNorm
+                applied in the transformer block.
+                Shape is (d_model,).
+        '''
+        self.attn.load_state_dict({'wq': weights['attn.q_proj.weight'],
+                                   'wk': weights['attn.k_proj.weight'],
+                                   'wv': weights['attn.v_proj.weight'],
+                                   'wo': weights['attn.output_proj.weight']})
+
+        self.attn_rms.load_state_dict({'weights': weights['ln1.weight']})
+
+        self.ff.load_state_dict({'w1': weights['ffn.w1.weight'],
+                                 'w2': weights['ffn.w2.weight'],
+                                 'w3': weights['ffn.w3.weight']})
+
+        self.ff_rms.load_state_dict({'weights': weights['ln2.weight']})
