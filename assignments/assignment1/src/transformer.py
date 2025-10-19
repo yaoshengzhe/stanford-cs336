@@ -353,3 +353,64 @@ class TransformerBlock(nn.Module):
                                  'w3': weights['ffn.w3.weight']})
 
         self.ff_rms.load_state_dict({'weights': weights['ln2.weight']})
+
+class TransformerLM(nn.Module):
+    def __init__(self,
+                 vocab_size: int,
+                 context_length: int,
+                 d_model: int,
+                 num_layers: int,
+                 num_heads: int,
+                 rope_theta: int,
+                 d_ff: int):
+
+        super().__init__()
+
+        self.embedding = Embedding(vocab=vocab_size, d_model=d_model)
+        self.output = Linear(in_features=d_model, out_features=vocab_size)
+
+        self.blocks = [TransformerBlock(d_model=d_model,
+                         num_heads=num_heads,
+                         max_seq_len=context_length,
+                         theta=rope_theta,
+                         d_ff=d_ff) for i in range(num_layers)]
+
+        self.final_rms = RMSNorm(d_model)
+
+    def forward(self, x: torch.Tensor):
+        # x: Int[Tensor, " batch_size sequence_length"],
+        x = self.embedding(x)
+
+        for block in self.blocks:
+            x = block(x)
+
+        x = self.final_rms(x)
+
+        # x: Int[Tensor, " batch_size sequence_length vocab_size"],
+        x = self.output(x)
+        return x
+
+    def load_weights(self, weights: dict[str, Tensor]):
+        keys_to_copy = ['attn.q_proj.weight',
+                        'attn.k_proj.weight',
+                        'attn.v_proj.weight',
+                        'attn.output_proj.weight',
+                        'ln1.weight',
+                        'ffn.w1.weight',
+                        'ffn.w2.weight',
+                        'ffn.w3.weight',
+                        'ln2.weight',
+                        ]
+
+
+        self.embedding.load_state_dict({'weights': weights['token_embeddings.weight']})
+        
+        self.output.load_state_dict({'weights': weights['lm_head.weight']})
+        
+        self.final_rms.load_state_dict({'weights': weights['ln_final.weight']})
+
+        for i in range(len(self.blocks)):
+            prefix = f"layers.{i}."
+            layer_weights = {k: weights[prefix+k] for k in keys_to_copy}
+
+            self.blocks[i].load_weights(layer_weights)
