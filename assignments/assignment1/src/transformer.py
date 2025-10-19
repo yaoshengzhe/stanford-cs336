@@ -52,6 +52,9 @@ class Linear(nn.Module):
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return torch.einsum('... i, ji -> ... j', x, self.weights)
 
+    def flops(self, d_in):
+        return 2 * d_in * self.weights.shape[0] * self.weights.shape[1]
+
 
 class Embedding(nn.Module):
     def __init__(self,
@@ -69,6 +72,9 @@ class Embedding(nn.Module):
     def forward(self, token_ids: torch.Tensor) -> torch.Tensor:
         return self.weights[token_ids] # seq_len, d_model
 
+    def flops(self, d_in):
+        return 0
+    
 
 class RMSNorm(nn.Module):
     def __init__(self,
@@ -95,6 +101,9 @@ class RMSNorm(nn.Module):
 
         return result.to(in_dtype)
 
+    def flops(self, d_in):
+        return 3 * d_in # 1 multiply (x**2), 1 sum, and 1 division
+
 
 class SwiGLU(nn.Module):
     def __init__(self,
@@ -119,6 +128,12 @@ class SwiGLU(nn.Module):
 
         return torch.einsum('... j, ij -> ... i', x, self.w2)
 
+    def flops(self, d_in):
+        return 2 * (d_in * self.w1.shape[0] * self.w1.shape[1] + # xw1
+                    d_in * self.w3.shape[0] * self.w3.shape[1] + # xw3
+                    d_in * self.w2.shape[0] * self.w2.shape[1]) + \
+               7 * d_in * self.w1.shape[0] # swiglu, assuming sigmoid take 5 flops per element)
+                    
 
 class RotaryPositionalEmbedding(nn.Module):
     def __init__(self,
@@ -178,6 +193,9 @@ class RotaryPositionalEmbedding(nn.Module):
 
         return x * self.cos[token_positions] + self._rearrange(x) * self.sin[token_positions]
 
+    def flops(self, d_in):
+        return 2 * d_in
+    
     def _rearrange(self, x: torch.Tensor):
         # take a tensor [q1, q2, q3, ..., qn] and rearrange it so that
         # every pair [q1, q2], [q3, q4], ... becomes [-q2, q1], [-q4, q3], ....
@@ -265,6 +283,10 @@ class MultiHeadAttention(nn.Module):
 
         return out @ self.wo.T
 
+    def flops(self, d_in):
+        return 2 * self.rope.flops(d_in) + 2 * (d_in * self.d_model * self.d_model) + \
+               2 * d_in * self.d_model * self.d_model
+
 
 class TransformerBlock(nn.Module):
     def __init__(self,
@@ -300,6 +322,11 @@ class TransformerBlock(nn.Module):
 
         return x
 
+    def flops(self, d_in):
+        return self.attn_rms.flops(d_in) + self.attn.flops(d_in) + \
+               self.ff_rms.flops(d_in) + self.ff.flops(d_in)
+        
+    
     def load_weights(self, weights: dict[str, Tensor]):
         '''
             weights (dict[str, Tensor]):
@@ -366,6 +393,9 @@ class TransformerLM(nn.Module):
 
         super().__init__()
 
+
+        self.d_model = d_model
+    
         self.embedding = Embedding(vocab=vocab_size, d_model=d_model)
         self.output = Linear(in_features=d_model, out_features=vocab_size)
 
@@ -389,6 +419,13 @@ class TransformerLM(nn.Module):
         # x: Int[Tensor, " batch_size sequence_length vocab_size"],
         x = self.output(x)
         return x
+
+    def flops(self, input_tokens):
+        d_in = input_tokens * self.d_model
+
+        return self.embedding.flops(d_in) + self.output.flops(d_in) + \
+               len(self.blocks) * self.blocks[0].flops(d_in) + \
+               self.final_rms.flops(d_in)
 
     def load_weights(self, weights: dict[str, Tensor]):
         keys_to_copy = ['attn.q_proj.weight',
