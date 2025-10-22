@@ -4,6 +4,16 @@ import math
 import torch
 import torch.nn as nn
 
+def cross_entropy(
+    inputs: Float[Tensor, " batch_size vocab_size"], targets: Int[Tensor, " batch_size"]
+) -> Float[Tensor, ""]:
+    batch_size, vocab_size = inputs.shape
+
+    x = inputs - inputs.max(-1, keepdim=True).values # substract max for numerical stability
+
+    return (-torch.gather(x, dim=1, index=targets.unsqueeze(1)) + \
+            x.exp().sum(-1, keepdim=True).log()).mean()
+
 def softmax(x: torch.Tensor) -> torch.Tensor:
     e = torch.exp(x - torch.max(x))
     return e / e.sum(dim=-1, keepdim=True)
@@ -74,7 +84,7 @@ class Embedding(nn.Module):
 
     def flops(self, d_in):
         return 0
-    
+
 
 class RMSNorm(nn.Module):
     def __init__(self,
@@ -133,7 +143,7 @@ class SwiGLU(nn.Module):
                     d_in * self.w3.shape[0] * self.w3.shape[1] + # xw3
                     d_in * self.w2.shape[0] * self.w2.shape[1]) + \
                7 * d_in * self.w1.shape[0] # swiglu, assuming sigmoid take 5 flops per element)
-                    
+
 
 class RotaryPositionalEmbedding(nn.Module):
     def __init__(self,
@@ -195,7 +205,7 @@ class RotaryPositionalEmbedding(nn.Module):
 
     def flops(self, d_in):
         return 2 * d_in
-    
+
     def _rearrange(self, x: torch.Tensor):
         # take a tensor [q1, q2, q3, ..., qn] and rearrange it so that
         # every pair [q1, q2], [q3, q4], ... becomes [-q2, q1], [-q4, q3], ....
@@ -325,8 +335,8 @@ class TransformerBlock(nn.Module):
     def flops(self, d_in):
         return self.attn_rms.flops(d_in) + self.attn.flops(d_in) + \
                self.ff_rms.flops(d_in) + self.ff.flops(d_in)
-        
-    
+
+
     def load_weights(self, weights: dict[str, Tensor]):
         '''
             weights (dict[str, Tensor]):
@@ -395,7 +405,7 @@ class TransformerLM(nn.Module):
 
 
         self.d_model = d_model
-    
+
         self.embedding = Embedding(vocab=vocab_size, d_model=d_model)
         self.output = Linear(in_features=d_model, out_features=vocab_size)
 
@@ -441,9 +451,9 @@ class TransformerLM(nn.Module):
 
 
         self.embedding.load_state_dict({'weights': weights['token_embeddings.weight']})
-        
+
         self.output.load_state_dict({'weights': weights['lm_head.weight']})
-        
+
         self.final_rms.load_state_dict({'weights': weights['ln_final.weight']})
 
         for i in range(len(self.blocks)):
