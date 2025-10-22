@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable, Iterable
+from typing import Optional
+
 import math
 import torch
 import torch.nn as nn
@@ -14,9 +17,11 @@ def cross_entropy(
     return (-torch.gather(x, dim=1, index=targets.unsqueeze(1)) + \
             x.exp().sum(-1, keepdim=True).log()).mean()
 
+
 def softmax(x: torch.Tensor) -> torch.Tensor:
     e = torch.exp(x - torch.max(x))
     return e / e.sum(dim=-1, keepdim=True)
+
 
 def dot_product_attention(
     Q: Float[Tensor, " ... queries d_k"],
@@ -44,6 +49,7 @@ def dot_product_attention(
     sm = softmax(masked / math.sqrt(Q.shape[-1]))
 
     return torch.einsum('... qk, ... kv -> ... qv', sm, V)
+
 
 class Linear(nn.Module):
     def __init__(self,
@@ -461,3 +467,53 @@ class TransformerLM(nn.Module):
             layer_weights = {k: weights[prefix+k] for k in keys_to_copy}
 
             self.blocks[i].load_weights(layer_weights)
+
+
+class AdamW(torch.optim.Optimizer):
+    def __init__(self, params,
+                 lr=1e-3,
+                 weight_decay=0.01,
+                 betas=(0.9, 0.999),
+                 eps=1e-8):
+
+        defaults = {'lr': lr,
+                    'decay': weight_decay,
+                    'betas': betas,
+                    'eps': eps}
+
+        super().__init__(params, defaults)
+
+    def step(self, closure: Optional[Callable] = None):
+        loss = None if closure is None else closure()
+
+        for group in self.param_groups:
+            lr = group['lr']
+            decay = group['decay']
+            betas = group['betas']
+            eps = group['eps']
+            
+            for p in group['params']:
+                if p.grad is None:
+                    continue
+
+                grad = p.grad.data
+                state = self.state[p]
+                t = state.get('t', 1) # t must start with 1 in AdamW
+                m = state.get('m', torch.zeros(p.shape))
+                v = state.get('v', torch.zeros(p.shape))
+
+                
+                # AdamW
+                m = betas[0] * m + (1 - betas[0]) * grad
+                v = betas[1] * v + (1 - betas[1]) * grad**2
+
+                lr_t = lr * math.sqrt(1 - betas[1]**t) / (1 - betas[0]**t)
+                
+                p.data = p.data - lr_t * m / (v.sqrt() + eps)
+                p.data = p.data - lr * decay * p.data
+                
+                state['t'] = t + 1
+                state['m'] = m
+                state['v'] = v
+
+        return loss
