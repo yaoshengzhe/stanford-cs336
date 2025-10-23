@@ -7,6 +7,28 @@ import math
 import torch
 import torch.nn as nn
 
+
+def gradient_clipping(parameters: Iterable[torch.nn.Parameter],
+                      max_l2_norm: float,
+                      eps=1e-6):
+    l2 = 0.0
+    
+    for p in parameters:
+        if p.grad is None:
+            continue
+        l2 += (p.grad.data ** 2).sum()
+
+    l2 = l2.sqrt()
+
+    if l2 > max_l2_norm:
+        scaling_factor = max_l2_norm / (l2 + eps)
+        for p in parameters:
+            if p.grad is None:
+                continue
+            p.grad.data = p.grad.data * scaling_factor
+    
+    return parameters
+
 def lr_cosine_schedule(it: int,
                        max_learning_rate: float,
                        min_learning_rate: float,
