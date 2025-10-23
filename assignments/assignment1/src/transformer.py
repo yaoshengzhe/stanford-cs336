@@ -4,8 +4,23 @@ from collections.abc import Callable, Iterable
 from typing import Optional
 
 import math
+import numpy as np
+import numpy.typing as npt
+import random
 import torch
 import torch.nn as nn
+
+
+def get_batch(
+    dataset: npt.NDArray, batch_size: int, context_length: int, device: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    sampled_indices = random.sample(range(len(dataset)-context_length), batch_size)
+    input = torch.tensor(np.array([dataset[idx:idx+context_length] for idx in sampled_indices]),
+                         device=device)
+    target = torch.tensor(np.array([dataset[idx+1:idx+context_length+1] for idx in sampled_indices]),
+                          device=device)
+
+    return (input, target)
 
 
 def gradient_clipping(parameters: Iterable[torch.nn.Parameter],
