@@ -166,7 +166,7 @@ class TestBpe(unittest.TestCase):
         bpe = Bpe(filepath=filepath,
                   vocab_size=263,
                   special_tokens=["<|endoftext|>"],
-                  debug_mode=True)  # 256 bytes + 14 merges
+                  debug_mode=False)  # 256 bytes + 14 merges
         bpe.train()
 
         # Check that all single bytes are in vocab
