@@ -20,13 +20,29 @@ Example usage:
 
     # Run on CPU
     python src/benchmark.py --device cpu
+
+    # Forward-only benchmark
+    python src/benchmark.py --mode forward
+
+    # Forward + backward benchmark
+    python src/benchmark.py --mode both
+
+    # Use predefined model configuration
+    python src/benchmark.py --config small
+    python src/benchmark.py --config medium
+    python src/benchmark.py --config large
+    python src/benchmark.py --config xl
+
+    # Run without warmup (for analysis)
+    python src/benchmark.py --warmup_steps 0
 """
 
 import argparse
-import time
+import timeit
 import sys
 from pathlib import Path
 import logging
+import statistics
 
 import torch
 import torch.nn as nn
@@ -42,6 +58,35 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Predefined model configurations (based on common Transformer sizes)
+# These correspond to typical GPT-style model sizes
+MODEL_CONFIGS = {
+    "small": {
+        "d_model": 768,
+        "num_layers": 12,
+        "num_heads": 12,
+        "d_ff": 3072,
+    },
+    "medium": {
+        "d_model": 1024,
+        "num_layers": 24,
+        "num_heads": 16,
+        "d_ff": 4096,
+    },
+    "large": {
+        "d_model": 1280,
+        "num_layers": 36,
+        "num_heads": 20,
+        "d_ff": 5120,
+    },
+    "xl": {
+        "d_model": 1600,
+        "num_layers": 48,
+        "num_heads": 25,
+        "d_ff": 6400,
+    },
+}
 
 
 class ModelBenchmark:
@@ -149,20 +194,24 @@ class ModelBenchmark:
             torch.cuda.synchronize()
 
     def benchmark_forward(self) -> dict:
-        """Benchmark forward pass."""
+        """Benchmark forward pass only."""
         logger.info("Benchmarking forward pass...")
 
         # Reset memory stats
         self.reset_memory_stats()
 
         # Warmup
-        with tqdm(total=self.warmup_iters, desc="Warmup (forward)", unit="iter",
-                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as pbar:
-            for _ in range(self.warmup_iters):
-                input_ids, _ = self.generate_random_batch()
-                with torch.no_grad():
-                    _ = self.model(input_ids)
-                pbar.update(1)
+        if self.warmup_iters > 0:
+            with tqdm(total=self.warmup_iters, desc="Warmup (forward)", unit="iter",
+                      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as pbar:
+                for _ in range(self.warmup_iters):
+                    input_ids, _ = self.generate_random_batch()
+                    with torch.no_grad():
+                        _ = self.model(input_ids)
+                    self.synchronize()
+                    pbar.update(1)
+        else:
+            logger.info("Skipping warmup (warmup_steps=0)")
 
         self.synchronize()
 
@@ -173,13 +222,13 @@ class ModelBenchmark:
                 input_ids, _ = self.generate_random_batch()
 
                 self.synchronize()
-                start_time = time.perf_counter()
+                start_time = timeit.default_timer()
 
                 with torch.no_grad():
                     logits = self.model(input_ids)
 
                 self.synchronize()
-                end_time = time.perf_counter()
+                end_time = timeit.default_timer()
 
                 iter_time = end_time - start_time
                 times.append(iter_time)
@@ -187,7 +236,7 @@ class ModelBenchmark:
                 # Update progress bar with current stats
                 postfix = {
                     'current': f'{iter_time*1000:.2f}ms',
-                    'mean': f'{sum(times)/len(times)*1000:.2f}ms'
+                    'mean': f'{statistics.mean(times)*1000:.2f}ms'
                 }
 
                 # Add memory stats if on CUDA
@@ -201,11 +250,16 @@ class ModelBenchmark:
         # Get memory stats
         memory_stats = self.get_memory_stats()
 
+        # Compute statistics
+        mean_time = statistics.mean(times)
+        std_time = statistics.stdev(times) if len(times) > 1 else 0.0
+
         return {
-            "mean_time_ms": sum(times) / len(times) * 1000,
+            "times": times,
+            "mean_time_ms": mean_time * 1000,
             "min_time_ms": min(times) * 1000,
             "max_time_ms": max(times) * 1000,
-            "std_time_ms": (sum((t - sum(times)/len(times))**2 for t in times) / len(times))**0.5 * 1000,
+            "std_time_ms": std_time * 1000,
             **{f"forward_{k}": v for k, v in memory_stats.items()},
         }
 
@@ -220,27 +274,33 @@ class ModelBenchmark:
         self.reset_memory_stats()
 
         # Warmup
-        with tqdm(total=self.warmup_iters, desc="Warmup (fwd+bwd)", unit="iter",
-                  bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as pbar:
-            for _ in range(self.warmup_iters):
-                input_ids, targets = self.generate_random_batch()
+        if self.warmup_iters > 0:
+            with tqdm(total=self.warmup_iters, desc="Warmup (fwd+bwd)", unit="iter",
+                      bar_format='{l_bar}{bar}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}]') as pbar:
+                for _ in range(self.warmup_iters):
+                    input_ids, targets = self.generate_random_batch()
 
-                # Forward
-                logits = self.model(input_ids)
+                    # Forward
+                    logits = self.model(input_ids)
 
-                # Compute loss
-                loss = criterion(
-                    logits.view(-1, self.vocab_size),
-                    targets.view(-1)
-                )
+                    # Compute loss
+                    loss = criterion(
+                        logits.view(-1, self.vocab_size),
+                        targets.view(-1)
+                    )
 
-                # Backward
-                loss.backward()
+                    # Backward
+                    loss.backward()
 
-                # Clear gradients
-                self.model.zero_grad()
+                    # Synchronize after each warmup step
+                    self.synchronize()
 
-                pbar.update(1)
+                    # Clear gradients
+                    self.model.zero_grad()
+
+                    pbar.update(1)
+        else:
+            logger.info("Skipping warmup (warmup_steps=0)")
 
         self.synchronize()
 
@@ -251,7 +311,7 @@ class ModelBenchmark:
                 input_ids, targets = self.generate_random_batch()
 
                 self.synchronize()
-                start_time = time.perf_counter()
+                start_time = timeit.default_timer()
 
                 # Forward
                 logits = self.model(input_ids)
@@ -266,7 +326,7 @@ class ModelBenchmark:
                 loss.backward()
 
                 self.synchronize()
-                end_time = time.perf_counter()
+                end_time = timeit.default_timer()
 
                 iter_time = end_time - start_time
                 times.append(iter_time)
@@ -274,7 +334,7 @@ class ModelBenchmark:
                 # Update progress bar with current stats
                 postfix = {
                     'current': f'{iter_time*1000:.2f}ms',
-                    'mean': f'{sum(times)/len(times)*1000:.2f}ms',
+                    'mean': f'{statistics.mean(times)*1000:.2f}ms',
                     'loss': f'{loss.item():.4f}'
                 }
 
@@ -292,33 +352,46 @@ class ModelBenchmark:
         # Get memory stats
         memory_stats = self.get_memory_stats()
 
+        # Compute statistics
+        mean_time = statistics.mean(times)
+        std_time = statistics.stdev(times) if len(times) > 1 else 0.0
+
         return {
-            "mean_time_ms": sum(times) / len(times) * 1000,
+            "times": times,
+            "mean_time_ms": mean_time * 1000,
             "min_time_ms": min(times) * 1000,
             "max_time_ms": max(times) * 1000,
-            "std_time_ms": (sum((t - sum(times)/len(times))**2 for t in times) / len(times))**0.5 * 1000,
+            "std_time_ms": std_time * 1000,
             **{f"backward_{k}": v for k, v in memory_stats.items()},
         }
 
-    def run_benchmark(self) -> dict:
-        """Run full benchmark suite."""
+    def run_benchmark(self, mode: str = "both") -> dict:
+        """Run benchmark suite.
+
+        Args:
+            mode: One of "forward" (forward pass only) or "both" (forward + backward)
+        """
         logger.info("=" * 80)
         logger.info("Starting benchmark...")
         logger.info("=" * 80)
         logger.info(f"Model config: vocab_size={self.vocab_size}, context_length={self.context_length}")
         logger.info(f"Batch size: {self.batch_size}")
         logger.info(f"Device: {self.device}, Precision: {self.precision}")
+        logger.info(f"Warmup steps: {self.warmup_iters}, Measurement steps: {self.benchmark_iters}")
+        logger.info(f"Mode: {mode}")
         logger.info("=" * 80)
 
         results = {}
 
-        # Benchmark forward pass
-        forward_results = self.benchmark_forward()
-        results["forward"] = forward_results
+        if mode in ("forward", "both"):
+            # Benchmark forward pass
+            forward_results = self.benchmark_forward()
+            results["forward"] = forward_results
 
-        # Benchmark backward pass
-        backward_results = self.benchmark_backward()
-        results["backward"] = backward_results
+        if mode == "both":
+            # Benchmark backward pass (which includes forward)
+            backward_results = self.benchmark_backward()
+            results["backward"] = backward_results
 
         return results
 
@@ -329,28 +402,28 @@ class ModelBenchmark:
         logger.info("=" * 80)
 
         # Forward pass results
-        logger.info("\nForward Pass:")
-        logger.info(f"  Mean time: {results['forward']['mean_time_ms']:.2f} ms")
-        logger.info(f"  Min time:  {results['forward']['min_time_ms']:.2f} ms")
-        logger.info(f"  Max time:  {results['forward']['max_time_ms']:.2f} ms")
-        logger.info(f"  Std dev:   {results['forward']['std_time_ms']:.2f} ms")
+        if "forward" in results:
+            fwd = results['forward']
+            logger.info("\nForward Pass (inference only):")
+            logger.info(f"  Mean ± Std: {fwd['mean_time_ms']:.2f} ± {fwd['std_time_ms']:.2f} ms")
+            logger.info(f"  Min time:   {fwd['min_time_ms']:.2f} ms")
+            logger.info(f"  Max time:   {fwd['max_time_ms']:.2f} ms")
 
-        if self.device == "cuda":
-            logger.info(f"\n  Memory allocated: {results['forward']['forward_allocated_mb']:.2f} MB")
-            logger.info(f"  Memory reserved:  {results['forward']['forward_reserved_mb']:.2f} MB")
-            logger.info(f"  Peak memory:      {results['forward']['forward_max_allocated_mb']:.2f} MB")
+            if self.device == "cuda":
+                logger.info(f"  Memory allocated: {fwd['forward_allocated_mb']:.2f} MB")
+                logger.info(f"  Peak memory:      {fwd['forward_max_allocated_mb']:.2f} MB")
 
         # Backward pass results
-        logger.info("\nForward + Backward Pass:")
-        logger.info(f"  Mean time: {results['backward']['mean_time_ms']:.2f} ms")
-        logger.info(f"  Min time:  {results['backward']['min_time_ms']:.2f} ms")
-        logger.info(f"  Max time:  {results['backward']['max_time_ms']:.2f} ms")
-        logger.info(f"  Std dev:   {results['backward']['std_time_ms']:.2f} ms")
+        if "backward" in results:
+            bwd = results['backward']
+            logger.info("\nForward + Backward Pass (training step):")
+            logger.info(f"  Mean ± Std: {bwd['mean_time_ms']:.2f} ± {bwd['std_time_ms']:.2f} ms")
+            logger.info(f"  Min time:   {bwd['min_time_ms']:.2f} ms")
+            logger.info(f"  Max time:   {bwd['max_time_ms']:.2f} ms")
 
-        if self.device == "cuda":
-            logger.info(f"\n  Memory allocated: {results['backward']['backward_allocated_mb']:.2f} MB")
-            logger.info(f"  Memory reserved:  {results['backward']['backward_reserved_mb']:.2f} MB")
-            logger.info(f"  Peak memory:      {results['backward']['backward_max_allocated_mb']:.2f} MB")
+            if self.device == "cuda":
+                logger.info(f"  Memory allocated: {bwd['backward_allocated_mb']:.2f} MB")
+                logger.info(f"  Peak memory:      {bwd['backward_max_allocated_mb']:.2f} MB")
 
         logger.info("=" * 80)
 
@@ -360,6 +433,15 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Benchmark BasicsTransformerLM performance",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+
+    # Predefined configuration
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        choices=list(MODEL_CONFIGS.keys()),
+        help=f"Use a predefined model configuration: {list(MODEL_CONFIGS.keys())}"
     )
 
     # Model architecture arguments
@@ -428,16 +510,23 @@ def parse_args():
         help="Numerical precision"
     )
     parser.add_argument(
-        "--warmup_iters",
+        "--warmup_steps",
         type=int,
         default=5,
-        help="Number of warmup iterations"
+        help="Number of warmup steps before timing (use 0 to skip warmup)"
     )
     parser.add_argument(
-        "--benchmark_iters",
+        "--num_steps",
         type=int,
         default=10,
-        help="Number of benchmark iterations"
+        help="Number of measurement steps for timing"
+    )
+    parser.add_argument(
+        "--mode",
+        type=str,
+        default="both",
+        choices=["forward", "both"],
+        help="Benchmark mode: 'forward' for forward pass only, 'both' for forward and backward"
     )
 
     # Optional output arguments
@@ -455,6 +544,15 @@ def main():
     """Main benchmark entry point."""
     args = parse_args()
 
+    # Apply predefined config if specified
+    if args.config:
+        config = MODEL_CONFIGS[args.config]
+        logger.info(f"Using predefined config '{args.config}': {config}")
+        args.d_model = config["d_model"]
+        args.num_layers = config["num_layers"]
+        args.num_heads = config["num_heads"]
+        args.d_ff = config["d_ff"]
+
     # Create benchmark
     benchmark = ModelBenchmark(
         vocab_size=args.vocab_size,
@@ -467,12 +565,12 @@ def main():
         batch_size=args.batch_size,
         device=args.device,
         precision=args.precision,
-        warmup_iters=args.warmup_iters,
-        benchmark_iters=args.benchmark_iters,
+        warmup_iters=args.warmup_steps,
+        benchmark_iters=args.num_steps,
     )
 
     # Run benchmark
-    results = benchmark.run_benchmark()
+    results = benchmark.run_benchmark(mode=args.mode)
 
     # Print results
     benchmark.print_results(results)
@@ -496,6 +594,9 @@ def main():
                 "batch_size": args.batch_size,
                 "device": args.device,
                 "precision": args.precision,
+                "warmup_steps": args.warmup_steps,
+                "num_steps": args.num_steps,
+                "mode": args.mode,
             },
             "results": results,
         }
