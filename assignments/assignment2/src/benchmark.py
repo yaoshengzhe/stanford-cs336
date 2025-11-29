@@ -5,8 +5,10 @@ Performance benchmarking script for BasicsTransformerLM.
 This script profiles forward and backward passes of the model with various configurations,
 measuring speed and memory usage. It uses random weights and data for testing.
 
+Results are saved to src/outputs/ by default for easy analysis and visualization.
+
 Example usage:
-    # Basic benchmark with default parameters
+    # Basic benchmark with default parameters (saves to src/outputs/)
     python src/benchmark.py
 
     # Benchmark with custom model size
@@ -35,12 +37,24 @@ Example usage:
 
     # Run without warmup (for analysis)
     python src/benchmark.py --warmup_steps 0
+
+    # Disable auto-save
+    python src/benchmark.py --no-save
+
+    # Custom output directory
+    python src/benchmark.py --output_dir results/
+
+    # Run all predefined configs
+    python src/benchmark.py --config all
 """
 
 import argparse
 import timeit
 import sys
+import json
+import csv
 from pathlib import Path
+from datetime import datetime
 import logging
 import statistics
 
@@ -58,6 +72,9 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
+
+# Default output directory
+DEFAULT_OUTPUT_DIR = Path(__file__).parent / "outputs"
 
 # Predefined model configurations (based on common Transformer sizes)
 # These correspond to typical GPT-style model sizes
@@ -87,6 +104,131 @@ MODEL_CONFIGS = {
         "d_ff": 6400,
     },
 }
+
+
+def generate_run_id(config_name: str | None, args) -> str:
+    """Generate a unique run ID based on config and timestamp."""
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if config_name:
+        return f"{config_name}_{timestamp}"
+    else:
+        return f"custom_d{args.d_model}_l{args.num_layers}_{timestamp}"
+
+
+def save_results(
+    results: dict,
+    config: dict,
+    output_dir: Path,
+    run_id: str,
+) -> dict[str, Path]:
+    """Save benchmark results in multiple formats.
+
+    Returns:
+        Dictionary mapping format names to file paths.
+    """
+    output_dir.mkdir(parents=True, exist_ok=True)
+    saved_files = {}
+
+    # Save detailed JSON results
+    json_path = output_dir / f"benchmark_{run_id}.json"
+    json_data = {
+        "run_id": run_id,
+        "timestamp": datetime.now().isoformat(),
+        "config": config,
+        "results": results,
+    }
+    with open(json_path, "w") as f:
+        json.dump(json_data, f, indent=2)
+    saved_files["json"] = json_path
+
+    # Append to CSV summary file for easy comparison
+    csv_path = output_dir / "benchmark_summary.csv"
+    csv_exists = csv_path.exists()
+
+    # Flatten results for CSV
+    csv_row = {
+        "run_id": run_id,
+        "timestamp": datetime.now().isoformat(),
+        "config_name": config.get("config_name", "custom"),
+        "d_model": config["d_model"],
+        "num_layers": config["num_layers"],
+        "num_heads": config["num_heads"],
+        "d_ff": config["d_ff"],
+        "vocab_size": config["vocab_size"],
+        "context_length": config["context_length"],
+        "batch_size": config["batch_size"],
+        "device": config["device"],
+        "precision": config["precision"],
+        "warmup_steps": config["warmup_steps"],
+        "num_steps": config["num_steps"],
+        "mode": config["mode"],
+    }
+
+    # Add forward pass results
+    if "forward" in results:
+        csv_row["forward_mean_ms"] = results["forward"]["mean_time_ms"]
+        csv_row["forward_std_ms"] = results["forward"]["std_time_ms"]
+        csv_row["forward_min_ms"] = results["forward"]["min_time_ms"]
+        csv_row["forward_max_ms"] = results["forward"]["max_time_ms"]
+
+    # Add backward pass results
+    if "backward" in results:
+        csv_row["backward_mean_ms"] = results["backward"]["mean_time_ms"]
+        csv_row["backward_std_ms"] = results["backward"]["std_time_ms"]
+        csv_row["backward_min_ms"] = results["backward"]["min_time_ms"]
+        csv_row["backward_max_ms"] = results["backward"]["max_time_ms"]
+
+    fieldnames = list(csv_row.keys())
+    with open(csv_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if not csv_exists:
+            writer.writeheader()
+        writer.writerow(csv_row)
+    saved_files["csv"] = csv_path
+
+    return saved_files
+
+
+def print_summary_table(all_results: list[dict]):
+    """Print a summary table of multiple benchmark runs."""
+    if not all_results:
+        return
+
+    logger.info("\n" + "=" * 100)
+    logger.info("BENCHMARK SUMMARY TABLE")
+    logger.info("=" * 100)
+
+    # Header
+    header = f"{'Config':<10} {'Params':<12} {'Forward (ms)':<20} {'Backward (ms)':<20} {'Device':<8}"
+    logger.info(header)
+    logger.info("-" * 100)
+
+    for run in all_results:
+        config = run["config"]
+        results = run["results"]
+        config_name = config.get("config_name", "custom")
+
+        # Calculate approximate params (rough estimate)
+        d = config["d_model"]
+        L = config["num_layers"]
+        V = config["vocab_size"]
+        params_m = (12 * L * d * d + V * d) / 1e6
+
+        fwd_str = "N/A"
+        bwd_str = "N/A"
+
+        if "forward" in results:
+            fwd = results["forward"]
+            fwd_str = f"{fwd['mean_time_ms']:.1f} ± {fwd['std_time_ms']:.1f}"
+
+        if "backward" in results:
+            bwd = results["backward"]
+            bwd_str = f"{bwd['mean_time_ms']:.1f} ± {bwd['std_time_ms']:.1f}"
+
+        row = f"{config_name:<10} {params_m:>8.1f}M    {fwd_str:<20} {bwd_str:<20} {config['device']:<8}"
+        logger.info(row)
+
+    logger.info("=" * 100)
 
 
 class ModelBenchmark:
@@ -440,8 +582,8 @@ def parse_args():
         "--config",
         type=str,
         default=None,
-        choices=list(MODEL_CONFIGS.keys()),
-        help=f"Use a predefined model configuration: {list(MODEL_CONFIGS.keys())}"
+        choices=list(MODEL_CONFIGS.keys()) + ["all"],
+        help=f"Use a predefined model configuration: {list(MODEL_CONFIGS.keys())} or 'all' to run all configs"
     )
 
     # Model architecture arguments
@@ -529,30 +671,28 @@ def parse_args():
         help="Benchmark mode: 'forward' for forward pass only, 'both' for forward and backward"
     )
 
-    # Optional output arguments
+    # Output arguments
     parser.add_argument(
-        "--output",
+        "--output_dir",
         type=str,
-        default=None,
-        help="Optional output file to save results (JSON format)"
+        default=str(DEFAULT_OUTPUT_DIR),
+        help="Directory to save benchmark results"
+    )
+    parser.add_argument(
+        "--no-save",
+        action="store_true",
+        help="Disable saving results to files"
     )
 
     return parser.parse_args()
 
 
-def main():
-    """Main benchmark entry point."""
-    args = parse_args()
+def run_single_benchmark(args, config_name: str | None = None) -> dict:
+    """Run a single benchmark with the given args.
 
-    # Apply predefined config if specified
-    if args.config:
-        config = MODEL_CONFIGS[args.config]
-        logger.info(f"Using predefined config '{args.config}': {config}")
-        args.d_model = config["d_model"]
-        args.num_layers = config["num_layers"]
-        args.num_heads = config["num_heads"]
-        args.d_ff = config["d_ff"]
-
+    Returns:
+        Dictionary with config and results.
+    """
     # Create benchmark
     benchmark = ModelBenchmark(
         vocab_size=args.vocab_size,
@@ -575,36 +715,73 @@ def main():
     # Print results
     benchmark.print_results(results)
 
-    # Save results if output file specified
-    if args.output:
-        import json
-        output_path = Path(args.output)
-        output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Build config dict
+    config = {
+        "config_name": config_name or "custom",
+        "vocab_size": args.vocab_size,
+        "context_length": args.context_length,
+        "d_model": args.d_model,
+        "num_layers": args.num_layers,
+        "num_heads": args.num_heads,
+        "d_ff": args.d_ff,
+        "rope_theta": args.rope_theta,
+        "batch_size": args.batch_size,
+        "device": args.device,
+        "precision": args.precision,
+        "warmup_steps": args.warmup_steps,
+        "num_steps": args.num_steps,
+        "mode": args.mode,
+    }
 
-        # Prepare results for JSON serialization
-        json_results = {
-            "config": {
-                "vocab_size": args.vocab_size,
-                "context_length": args.context_length,
-                "d_model": args.d_model,
-                "num_layers": args.num_layers,
-                "num_heads": args.num_heads,
-                "d_ff": args.d_ff,
-                "rope_theta": args.rope_theta,
-                "batch_size": args.batch_size,
-                "device": args.device,
-                "precision": args.precision,
-                "warmup_steps": args.warmup_steps,
-                "num_steps": args.num_steps,
-                "mode": args.mode,
-            },
-            "results": results,
-        }
+    return {"config": config, "results": results}
 
-        with open(output_path, "w") as f:
-            json.dump(json_results, f, indent=2)
 
-        logger.info(f"\nResults saved to {output_path}")
+def main():
+    """Main benchmark entry point."""
+    args = parse_args()
+    output_dir = Path(args.output_dir)
+    all_results = []
+
+    # Determine which configs to run
+    if args.config == "all":
+        configs_to_run = list(MODEL_CONFIGS.keys())
+    elif args.config:
+        configs_to_run = [args.config]
+    else:
+        configs_to_run = [None]  # Custom config
+
+    for config_name in configs_to_run:
+        # Apply predefined config if specified
+        if config_name:
+            config = MODEL_CONFIGS[config_name]
+            logger.info(f"\n{'='*80}")
+            logger.info(f"Running benchmark with config '{config_name}': {config}")
+            logger.info(f"{'='*80}")
+            args.d_model = config["d_model"]
+            args.num_layers = config["num_layers"]
+            args.num_heads = config["num_heads"]
+            args.d_ff = config["d_ff"]
+
+        # Run the benchmark
+        run_result = run_single_benchmark(args, config_name)
+        all_results.append(run_result)
+
+        # Save results unless disabled
+        if not getattr(args, 'no_save', False):
+            run_id = generate_run_id(config_name, args)
+            saved_files = save_results(
+                results=run_result["results"],
+                config=run_result["config"],
+                output_dir=output_dir,
+                run_id=run_id,
+            )
+            logger.info(f"\nResults saved:")
+            for fmt, path in saved_files.items():
+                logger.info(f"  {fmt}: {path}")
+
+    # Print summary table if multiple configs were run
+    if len(all_results) > 1:
+        print_summary_table(all_results)
 
 
 if __name__ == "__main__":
